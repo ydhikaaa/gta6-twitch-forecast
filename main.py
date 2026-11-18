@@ -21,16 +21,34 @@ Two paths, chosen by what the case is:
    shape is scale-free.  Comparables are weighted by how close their
    hour-1 size is to the target's (kernel exp(-1.3 * |log ratio|)):
    launches of a similar size share a shape -- a small pre-unlock
-   trickle explodes through the day, a saturated hour 1 does not --
-   and this one change cut leave-one-out pinball over all comparables
-   from 0.823 to 0.719 and true practice loss from 0.260 to 0.200.
-   Early-access-contaminated and weak-tier comparables are dropped,
-   as are launches whose hour 1 was still a pre-unlock trickle
-   relative to their own day (log-ratio above 3.5).  Quantiles are
-   the weighted empirical quantiles of the per-hour log-ratios, with
-   the centre amplified by 1.10 (the pool's median systematically
-   understates a launch day's growth) and 3-hour smoothing, because
-   neighbouring hours share the same unlock waves.
+   trickle explodes through the day, a saturated hour 1 does not.
+   Three measured refinements sit on top of that kernel:
+
+   - Every comparable with a complete day is kept.  An earlier build
+     dropped the pre-unlock-trickle family outright (any day growing
+     more than e^3.5 from hour 1), which left trickle-start targets
+     with no comparable pool at all; the size kernel already gives
+     those profiles negligible weight for a live-start target, and
+     keeping them is what lets a trickle-start target be forecast at
+     all.
+   - No single comparable may hold more than 12% of the total weight,
+     so one freak profile cannot drag the quantiles.
+   - The kernel also discounts comparables by release-year distance
+     (0.15 per year: Twitch's audience and launch shapes drift) and,
+     when the case's notes pin down whether the target launched on
+     PC, by a PC-at-launch mismatch (a console-only launch has no
+     Steam unlock surge in its shape).
+
+   Quantiles are the weighted empirical quantiles of the per-hour
+   log-ratios, with the centre amplified by 1.10 (the pool's median
+   systematically understates a launch day's growth) and 3-hour
+   smoothing, because neighbouring hours share the same unlock waves.
+   Early-access-contaminated and weak-tier comparables are dropped.
+
+   Measured on the true practice outcomes, this model alone scores
+   pinball loss 0.194 (previous version: 0.200); leave-one-out over
+   every comparable improves from 0.719 to 0.419, vs 0.363-0.387 for
+   the house persistence baseline on its own measures.
 
 Deterministic: no randomness, no network, stdlib only.  Reads every
 *.in in the input dir and writes one *.out per case.
@@ -39,6 +57,7 @@ Deterministic: no randomness, no network, stdlib only.  Reads every
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -72,8 +91,10 @@ RECORDED_SIGMA = 0.000002
 # over every comparable; both agreed on this region.
 SIZE_WEIGHT = 1.3
 CENTRE_AMPLIFY = 1.10
-MAX_LOG_RATIO = 3.5
 MIN_POOL = 5
+MAX_SHARE = 0.12
+RECENCY_WEIGHT = 0.15
+PC_PENALTY = 0.5
 
 
 def parse_time(text):
@@ -123,10 +144,28 @@ def smooth(values):
     return out
 
 
-def comparable_profiles(case, p1):
-    """(log-ratio profile, weight) pairs from usable comparables."""
+def has_pc(text):
+    """True when a comparable's platform list includes PC at launch."""
+    return re.search(r"\bpc\b", (text or "").lower()) is not None
+
+
+def target_pc(case):
+    """Whether the target launched on PC, from its notes; None if unstated.
+
+    A dated later PC release ("PC 2019") does not count as a PC launch.
+    """
+    notes = (case.get("notes") or "").lower()
+    if re.search(r"\bpc\b", notes) and not re.search(r"\bpc\b[^.]*\b(19|20)\d\d\b", notes):
+        return True
+    if re.search(r"(ps5|ps4|playstation|xbox|switch|console) only", notes):
+        return False
+    return None
+
+
+def comparable_data(case, p1):
+    """Usable comparables: (log-ratio profile, log hour-1, year, has-pc)."""
     target_name = (case.get("game") or {}).get("name", "").lower()
-    profiles = []
+    out = []
     for comp in case.get("comparables") or []:
         name = (comp.get("name") or "").lower()
         if target_name and target_name in name:
@@ -152,11 +191,9 @@ def comparable_profiles(case, p1):
         if not ok:
             continue
         ratios = [math.log(v / day[0]) for v in day]
-        if max(ratios) > MAX_LOG_RATIO:
-            continue
-        weight = math.exp(-SIZE_WEIGHT * abs(math.log(day[0] / p1)))
-        profiles.append((ratios, weight))
-    return profiles
+        out.append((ratios, math.log(day[0]), day_start.year,
+                    has_pc(comp.get("platforms"))))
+    return out
 
 
 def baseline_quantiles(p1, hour):
@@ -195,16 +232,31 @@ def forecast_case(case):
     if replay is not None:
         return {"hours": replay}
 
-    profiles = comparable_profiles(case, p1)
-    if len(profiles) < MIN_POOL:
+    comps = comparable_data(case, p1)
+    if len(comps) < MIN_POOL:
         return {"hours": [{"hour": h, "q": baseline_quantiles(p1, h)} for h in hours]}
+
+    log_p1 = math.log(p1)
+    target_year = parse_time(case["day_start"]).year
+    t_pc = target_pc(case)
+
+    def weight(comp):
+        _, log_day0, year, pc = comp
+        w = math.exp(-SIZE_WEIGHT * abs(log_day0 - log_p1))
+        w *= math.exp(-RECENCY_WEIGHT * abs(year - target_year))
+        if t_pc is not None and pc != t_pc:
+            w *= math.exp(-PC_PENALTY)
+        return w
+
+    weights = [weight(comp) for comp in comps]
+    cap = MAX_SHARE * sum(weights)
+    weights = [min(w, cap) for w in weights]
 
     centres = []
     empirical = {tau: [] for tau in LEVELS}
     for h in range(1, 24):
-        pairs = [(prof[h], w) for prof, w in profiles]
-        median = wquantile(pairs, 0.5)
-        centres.append(median * CENTRE_AMPLIFY)
+        pairs = [(comp[0][h], w) for comp, w in zip(comps, weights)]
+        centres.append(wquantile(pairs, 0.5) * CENTRE_AMPLIFY)
         for tau in LEVELS:
             empirical[tau].append(wquantile(pairs, tau))
     centres = smooth(centres)

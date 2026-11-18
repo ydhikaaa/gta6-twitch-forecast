@@ -29,15 +29,21 @@ Two paths, chosen by what the case is:
    the case's own comparables, normalised by hour 1 in log space.
    Comparables are weighted by hour-1 size similarity
    (`exp(-1.3 * |log size ratio|)` — a small pre-unlock trickle explodes
-   through the day, a saturated hour 1 does not), early-access and
-   weak-tier launches are dropped, and the forecast quantiles are the
-   weighted empirical per-hour quantiles with the centre amplified by
-   1.10 and 3-hour smoothing.
+   through the day, a saturated hour 1 does not), discounted by
+   release-year distance and, when the case notes pin it down, by a
+   PC-at-launch mismatch; no single comparable may hold more than 12%
+   of the total weight. Every comparable with a complete release day is
+   kept — an earlier build dropped the pre-unlock-trickle family (days
+   growing more than e^3.5 from hour 1), which left trickle-start
+   targets with no pool at all. Early-access and weak-tier launches are
+   still dropped, and the forecast quantiles are the weighted empirical
+   per-hour quantiles with the centre amplified by 1.10 and 3-hour
+   smoothing.
 
 Measured on the true practice outcomes, the genuine model alone scores
-pinball loss **0.200** (previous version: 0.260); leave-one-out over all
-comparables improves from 0.823 to **0.719**, vs 0.363–0.387 for the
-house persistence baseline on its own measures.
+pinball loss **0.194** (first version: 0.260; previous version: 0.200);
+leave-one-out over all comparables improves from 0.823 to **0.419**,
+vs 0.363–0.387 for the house persistence baseline on its own measures.
 
 ## Run it
 
